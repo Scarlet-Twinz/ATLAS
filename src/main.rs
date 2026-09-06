@@ -7,6 +7,7 @@ use tokio::net::TcpListener;
 use tokio::time::interval;
 
 const LISTEN_ADDR: &str = "127.0.0.1:8080";
+const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -33,13 +34,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
         })
     };
 
+    let health_task = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            let mut ticker = interval(HEALTH_CHECK_INTERVAL);
+            loop {
+                ticker.tick().await;
+                for backend in state.backends().to_vec() {
+                    let healthy = state.health_check(backend).await;
+                    println!("health backend={backend} healthy={healthy}");
+                }
+            }
+        })
+    };
+
     loop {
         tokio::select! {
             result = listener.accept() => {
                 let (stream, peer) = result?;
                 let state = Arc::clone(&state);
                 println!("accepted connection from {peer}");
-
                 tokio::spawn(async move {
                     if let Err(error) = proxy_connection_with_state(stream, (*state).clone()).await {
                         eprintln!("connection error from {peer}: {error}");
@@ -53,6 +67,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
+    health_task.abort();
     metrics_task.abort();
     Ok(())
 }
