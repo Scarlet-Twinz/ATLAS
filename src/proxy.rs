@@ -83,7 +83,8 @@ impl ProxyMetrics {
 
     fn request_succeeded(&self, bytes: usize) {
         self.requests_succeeded.fetch_add(1, Ordering::Relaxed);
-        self.bytes_to_client.fetch_add(bytes as u64, Ordering::Relaxed);
+        self.bytes_to_client
+            .fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
     fn request_failed(&self) {
@@ -157,13 +158,21 @@ impl BackendPool {
     }
 
     fn mark_failure(&mut self, address: SocketAddr) {
-        if let Some(backend) = self.backends.iter_mut().find(|backend| backend.address == address) {
+        if let Some(backend) = self
+            .backends
+            .iter_mut()
+            .find(|backend| backend.address == address)
+        {
             backend.unhealthy_until = Some(Instant::now() + BACKEND_COOLDOWN);
         }
     }
 
     fn mark_success(&mut self, address: SocketAddr) {
-        if let Some(backend) = self.backends.iter_mut().find(|backend| backend.address == address) {
+        if let Some(backend) = self
+            .backends
+            .iter_mut()
+            .find(|backend| backend.address == address)
+        {
             backend.unhealthy_until = None;
         }
     }
@@ -241,7 +250,10 @@ pub async fn proxy_connection(client: TcpStream) -> Result<(), ProxyError> {
     proxy_connection_with_state(client, ProxyState::new(ProxyConfig::default())).await
 }
 
-pub async fn proxy_connection_with_state(mut client: TcpStream, state: ProxyState) -> Result<(), ProxyError> {
+pub async fn proxy_connection_with_state(
+    mut client: TcpStream,
+    state: ProxyState,
+) -> Result<(), ProxyError> {
     let mut read_buffer = Vec::with_capacity(BUFFER_SIZE);
     let mut chunk = vec![0_u8; BUFFER_SIZE];
 
@@ -406,13 +418,18 @@ fn find_header_end(buffer: &[u8]) -> Option<usize> {
         .map(|position| position + 4)
 }
 
-async fn write_error_response(client: &mut TcpStream, error: &ProxyError) -> Result<(), std::io::Error> {
+async fn write_error_response(
+    client: &mut TcpStream,
+    error: &ProxyError,
+) -> Result<(), std::io::Error> {
     let (status, reason) = match error {
         ProxyError::Http(_)
         | ProxyError::InvalidContentLength
         | ProxyError::RequestBodyTooLarge => (400, "Bad Request"),
         ProxyError::UpstreamTimeout => (504, "Gateway Timeout"),
-        ProxyError::NoHealthyBackends | ProxyError::UpstreamUnavailable => (503, "Service Unavailable"),
+        ProxyError::NoHealthyBackends | ProxyError::UpstreamUnavailable => {
+            (503, "Service Unavailable")
+        }
         _ => (502, "Bad Gateway"),
     };
 
@@ -430,7 +447,11 @@ fn parse_backends(value: &str) -> Result<Vec<SocketAddr>, ProxyError> {
         .split(',')
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| value.parse().map_err(|_| ProxyError::InvalidBackend(value.to_owned())))
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|_| ProxyError::InvalidBackend(value.to_owned()))
+        })
         .collect()
 }
 
@@ -491,20 +512,21 @@ mod tests {
 
     #[test]
     fn parses_content_length() {
-        let request = parse_request(
-            "POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 42\r\n\r\n",
-        )
-        .unwrap();
+        let request =
+            parse_request("POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 42\r\n\r\n")
+                .unwrap();
         assert_eq!(request_content_length(&request).unwrap(), 42);
     }
 
     #[test]
     fn rejects_invalid_content_length() {
-        let request = parse_request(
-            "POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: nope\r\n\r\n",
-        )
-        .unwrap();
-        assert!(matches!(request_content_length(&request), Err(ProxyError::InvalidContentLength)));
+        let request =
+            parse_request("POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: nope\r\n\r\n")
+                .unwrap();
+        assert!(matches!(
+            request_content_length(&request),
+            Err(ProxyError::InvalidContentLength)
+        ));
     }
 
     #[test]
@@ -521,6 +543,9 @@ mod tests {
         let request = request_with_host("localhost");
         assert_eq!(request.method, "GET");
         let state = ProxyState::new(ProxyConfig::default());
-        assert!(state.metrics().render_prometheus().contains("atlas_requests_total"));
+        assert!(state
+            .metrics()
+            .render_prometheus()
+            .contains("atlas_requests_total"));
     }
 }

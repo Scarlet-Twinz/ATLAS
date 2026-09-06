@@ -126,8 +126,8 @@ pub fn parse_response_head(response: &[u8]) -> Result<HttpResponseHead, ParseErr
         return Err(ParseError::IncompleteRequest);
     };
 
-    let text = std::str::from_utf8(&response[..header_end])
-        .map_err(|_| ParseError::InvalidStatusLine)?;
+    let text =
+        std::str::from_utf8(&response[..header_end]).map_err(|_| ParseError::InvalidStatusLine)?;
     let mut lines = text.split("\r\n");
     let status_line = lines.next().ok_or(ParseError::MissingResponseStatus)?;
 
@@ -159,7 +159,10 @@ pub fn parse_response_head(response: &[u8]) -> Result<HttpResponseHead, ParseErr
     })
 }
 
-fn parse_headers<'a, I>(lines: &mut I, reject_duplicates: bool) -> Result<Vec<(String, String)>, ParseError>
+fn parse_headers<'a, I>(
+    lines: &mut I,
+    reject_duplicates: bool,
+) -> Result<Vec<(String, String)>, ParseError>
 where
     I: Iterator<Item = &'a str>,
 {
@@ -194,7 +197,10 @@ where
     Ok(headers)
 }
 
-fn response_body_mode(status: u16, headers: &[(String, String)]) -> Result<ResponseBodyMode, ParseError> {
+fn response_body_mode(
+    status: u16,
+    headers: &[(String, String)],
+) -> Result<ResponseBodyMode, ParseError> {
     if (100..200).contains(&status) || status == 204 || status == 304 {
         return Ok(ResponseBodyMode::None);
     }
@@ -287,10 +293,8 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_headers_case_insensitively() {
-        let error = parse_request(
-            "GET / HTTP/1.1\r\nHost: localhost\r\nhOsT: example.com\r\n\r\n",
-        )
-        .unwrap_err();
+        let error = parse_request("GET / HTTP/1.1\r\nHost: localhost\r\nhOsT: example.com\r\n\r\n")
+            .unwrap_err();
         assert_eq!(error, ParseError::DuplicateHeader("hOsT".to_owned()));
     }
 
@@ -302,7 +306,10 @@ mod tests {
 
     #[test]
     fn rejects_headers_over_limit() {
-        let request = format!("GET / HTTP/1.1\r\nHost: {}\r\n\r\n", "a".repeat(MAX_HEADER_BYTES));
+        let request = format!(
+            "GET / HTTP/1.1\r\nHost: {}\r\n\r\n",
+            "a".repeat(MAX_HEADER_BYTES)
+        );
         let error = parse_request(&request).unwrap_err();
         assert_eq!(error, ParseError::HeadersTooLarge);
     }
