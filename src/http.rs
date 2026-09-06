@@ -1,5 +1,7 @@
 use std::fmt;
 
+pub const MAX_HEADER_BYTES: usize = 64 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpRequest {
     pub method: String,
@@ -19,6 +21,8 @@ pub enum ParseError {
     UnsupportedVersion,
     InvalidHeader,
     DuplicateHeader(String),
+    HeadersTooLarge,
+    IncompleteRequest,
 }
 
 impl fmt::Display for ParseError {
@@ -33,6 +37,8 @@ impl fmt::Display for ParseError {
             Self::UnsupportedVersion => f.write_str("unsupported HTTP version"),
             Self::InvalidHeader => f.write_str("invalid HTTP header"),
             Self::DuplicateHeader(name) => write!(f, "duplicate HTTP header: {name}"),
+            Self::HeadersTooLarge => f.write_str("HTTP headers exceed maximum size"),
+            Self::IncompleteRequest => f.write_str("incomplete HTTP request headers"),
         }
     }
 }
@@ -42,6 +48,14 @@ impl std::error::Error for ParseError {}
 pub fn parse_request(request: &str) -> Result<HttpRequest, ParseError> {
     if request.is_empty() {
         return Err(ParseError::EmptyRequest);
+    }
+
+    if request.len() > MAX_HEADER_BYTES {
+        return Err(ParseError::HeadersTooLarge);
+    }
+
+    if !request.contains("\r\n\r\n") {
+        return Err(ParseError::IncompleteRequest);
     }
 
     let mut lines = request.split("\r\n");
@@ -98,10 +112,13 @@ pub fn parse_request(request: &str) -> Result<HttpRequest, ParseError> {
 mod tests {
     use super::*;
 
+    fn complete_request() -> &'static str {
+        "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    }
+
     #[test]
     fn parses_request_line_and_headers() {
-        let request = "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-        let parsed = parse_request(request).unwrap();
+        let parsed = parse_request(complete_request()).unwrap();
 
         assert_eq!(parsed.method, "GET");
         assert_eq!(parsed.target, "/health");
@@ -117,13 +134,13 @@ mod tests {
 
     #[test]
     fn rejects_missing_target() {
-        let error = parse_request("GET HTTP/1.1\r\n\r\n").unwrap_err();
+        let error = parse_request("GET HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap_err();
         assert_eq!(error, ParseError::MissingTarget);
     }
 
     #[test]
     fn rejects_unsupported_version() {
-        let error = parse_request("GET / HTTP/2.0\r\n\r\n").unwrap_err();
+        let error = parse_request("GET / HTTP/2.0\r\nHost: localhost\r\n\r\n").unwrap_err();
         assert_eq!(error, ParseError::UnsupportedVersion);
     }
 
@@ -140,5 +157,18 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, ParseError::DuplicateHeader("hOsT".to_owned()));
+    }
+
+    #[test]
+    fn rejects_incomplete_headers() {
+        let error = parse_request("GET / HTTP/1.1\r\nHost: localhost\r\n").unwrap_err();
+        assert_eq!(error, ParseError::IncompleteRequest);
+    }
+
+    #[test]
+    fn rejects_headers_over_limit() {
+        let request = format!("GET / HTTP/1.1\r\nHost: {}\r\n\r\n", "a".repeat(MAX_HEADER_BYTES));
+        let error = parse_request(&request).unwrap_err();
+        assert_eq!(error, ParseError::HeadersTooLarge);
     }
 }
