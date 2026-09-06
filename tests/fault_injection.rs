@@ -9,7 +9,7 @@ use tokio::net::TcpListener;
 #[tokio::test]
 async fn unavailable_backend_returns_503() {
     let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let proxy_addr = proxy_listener.local_addr().await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
     let backend = unused_local_address();
     let config = ProxyConfig {
         backends: vec![backend],
@@ -39,7 +39,7 @@ async fn unavailable_backend_returns_503() {
 #[tokio::test]
 async fn metrics_endpoint_is_available_without_upstream() {
     let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let proxy_addr = proxy_listener.local_addr().await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
     let state = ProxyState::new(ProxyConfig::default());
 
     let server = tokio::spawn(async move {
