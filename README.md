@@ -1,15 +1,15 @@
 # ATLAS
 
-**HTTP reverse proxy built in Rust.**
+**Systems-oriented HTTP reverse proxy built in Rust.**
 
-ATLAS is a systems-oriented networking project focused on explicit HTTP/TCP behavior, upstream routing, connection management, resilience, observability, and failure handling.
+ATLAS is a compact networking infrastructure project built around explicit HTTP/1.x framing, TCP connection management, upstream routing, resilience, observability, and failure handling. Rather than hiding proxy behavior behind a high-level framework, ATLAS keeps the core request, response, connection, routing, and recovery paths visible in the codebase.
 
 ## Architecture
 
 ```text
                          +------------------+
 Client ----------------> |      ATLAS       |
-HTTP/1.1                 |  Reverse Proxy   |
+HTTP/1.x                 |  Reverse Proxy   |
                          +--------+---------+
                                   |
                          +--------+---------+
@@ -20,32 +20,72 @@ HTTP/1.1                 |  Reverse Proxy   |
                            API-A  API-B  API-C
 ```
 
-## Implemented
+The runtime accepts client connections, parses HTTP requests, selects an upstream backend, forwards requests, interprets upstream response framing, and returns the response while maintaining backend health and connection state.
 
-- Tokio asynchronous TCP runtime
+## Core capabilities
+
+### HTTP and protocol handling
+
 - HTTP/1.1 request parsing and validation
 - HTTP/1.0 and HTTP/1.1 upstream response parsing
 - Content-Length response framing
 - Chunked transfer decoding
 - No-body response handling
 - Close-delimited response handling
-- Request body forwarding up to 16 MiB
+- Header-size enforcement
+- Request-body forwarding with a bounded 16 MiB limit
+- Validation of conflicting Content-Length headers
+- Explicit handling of unsupported transfer encodings
+
+### Upstream and connection management
+
 - Configurable round-robin backend pool
-- Upstream connection reuse for reusable HTTP responses
+- Multiple upstream backends
+- Upstream TCP connection reuse for reusable responses
 - Client-side keep-alive
+- Explicit connection-reuse decisions based on HTTP framing
 - Connect and request timeouts
 - Configurable retry attempts
+
+### Resilience
+
 - Passive backend failure cooldown
-- Active backend health checks
+- Active TCP backend health checks
+- Healthy/unhealthy backend selection
+- Retry handling for upstream failures
+- Timeout handling without leaving stalled requests behind
 - Graceful Ctrl+C shutdown
+- Bounded request and response processing
+
+### Observability
+
 - Prometheus-compatible `/metrics` endpoint
-- Runtime Prometheus counters
-- Structured access logs
-- Fault-injection integration tests
+- Runtime request counters
+- Upstream failure and timeout counters
+- Bytes-returned counter
+- Structured key/value access logs
+
+Example:
+
+```text
+access method=GET target=/ status=200 bytes=669
+```
+
+### Verification
+
+- Unit tests for HTTP parsing and framing
+- Asynchronous runtime tests
+- Connection-reuse tests
+- Backend health and routing tests
+- Chunked-response runtime coverage
+- Unavailable-upstream fault injection
+- Metrics endpoint coverage
 - Parser benchmark example
-- Unit and asynchronous runtime tests
+- Rust formatting and Clippy enforcement
 
 ## Configuration
+
+ATLAS can be configured through environment variables:
 
 ```text
 ATLAS_BACKENDS=127.0.0.1:9000,127.0.0.1:9001
@@ -58,7 +98,19 @@ If `ATLAS_BACKENDS` is not provided, ATLAS uses `127.0.0.1:9000`.
 
 The listener binds to `127.0.0.1:8080`.
 
-## Running
+## Getting started
+
+### Prerequisites
+
+- Rust toolchain with Cargo
+- Python 3 for the optional local HTTP upstream used in the example below
+
+Verify Rust:
+
+```bash
+rustc --version
+cargo --version
+```
 
 ### Start an upstream
 
@@ -74,19 +126,23 @@ python -m http.server 9000
 cargo run
 ```
 
+ATLAS starts on `127.0.0.1:8080` and routes traffic to the configured backend pool.
+
 ### Query through the proxy
 
 ```bash
 curl -v http://127.0.0.1:8080/
 ```
 
-### Metrics
+### Inspect metrics
 
 ```bash
 curl http://127.0.0.1:8080/metrics
 ```
 
-### Tests
+## Testing
+
+Run the full validation set:
 
 ```bash
 cargo fmt -- --check
@@ -94,65 +150,67 @@ cargo test --all-targets
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-### Parser benchmark
+Run the parser benchmark:
 
 ```bash
 cargo run --example benchmark --release
 ```
 
-The benchmark measures one million request/response parser iterations. It is intended as a lightweight regression signal rather than a production load benchmark.
+The benchmark executes one million parser iterations and is intended as a lightweight regression signal rather than a production load benchmark.
 
-## Resilience
+## Resilience model
 
-ATLAS retries failed upstream operations according to `ATLAS_MAX_RETRIES`. Failed backends enter a short cooldown and active health checks periodically probe configured backends so recovered services can return to rotation.
+ATLAS distinguishes between transient upstream failures and normal application-level failures. Failed upstream operations can be retried according to `ATLAS_MAX_RETRIES`, while failed backends enter a short cooldown to reduce repeated traffic to an unhealthy endpoint.
 
-Reusable HTTP/1.1 responses with explicit framing can keep the upstream TCP connection alive. HTTP/1.0 responses require explicit `Connection: keep-alive`. Close-delimited responses are never reused.
+Active health checks probe configured backends so recovered services can return to rotation. Backend selection is round-robin across currently healthy endpoints.
 
-## Metrics and logging
+Connection reuse is driven by HTTP message framing. Reusable HTTP/1.x responses can keep an upstream TCP connection alive when their body boundary is explicit. Close-delimited responses are consumed through connection close and are never returned to the reuse pool.
 
-`/metrics` exposes Prometheus text for total requests, successful requests, failed requests, upstream failures, upstream timeouts, and bytes returned to clients.
+Chunked responses are fully consumed before an upstream connection is considered reusable, including data that may already have been buffered together with the response headers.
 
-Access logs use stable key/value fields:
+## Engineering approach
 
-```text
-access method=GET target=/ status=200 bytes=669
-```
+ATLAS is intentionally implemented on Tokio TCP primitives rather than a high-level reverse-proxy framework. This keeps the important infrastructure behavior explicit:
 
-## Testing
+- socket lifecycle and connection ownership;
+- HTTP request and response framing;
+- backend selection;
+- upstream connection reuse;
+- retry and timeout boundaries;
+- health state;
+- failure classification;
+- runtime metrics and access logging.
 
-The test suite covers parsing, framing, routing, backend state, connection reuse decisions, runtime response handling, chunked responses, unavailable-upstream behavior, and the metrics endpoint.
-
-The fault-injection tests deliberately use an unavailable local backend to verify that ATLAS returns `503 Service Unavailable` instead of hanging or crashing.
-
-## Engineering notes
-
-ATLAS is intentionally built around Tokio TCP primitives rather than a high-level reverse-proxy framework. Connection handling, HTTP framing, backend selection, retries, timeouts, health state, and observability remain explicit in the codebase.
-
-The implementation deliberately keeps close-delimited responses non-reusable because their message boundary is the TCP connection close. Chunked responses are fully consumed before a reusable upstream connection is returned to the pool.
+The project is designed as a focused systems-engineering implementation rather than a feature-heavy application. Its purpose is to demonstrate control over networking fundamentals, protocol boundaries, concurrency, resilience, and operational behavior.
 
 ## Repository structure
 
 ```text
 ATLAS/
-├── Cargo.toml
-├── Cargo.lock
-├── README.md
+├── .github/
+│   └── workflows/
+│       └── ci.yml
 ├── examples/
 │   └── benchmark.rs
 ├── tests/
 │   └── fault_injection.rs
-└── src/
-    ├── http.rs
-    ├── lib.rs
-    ├── main.rs
-    └── proxy.rs
+├── src/
+│   ├── http.rs
+│   ├── lib.rs
+│   ├── main.rs
+│   └── proxy.rs
+├── Cargo.toml
+├── Cargo.lock
+└── README.md
 ```
 
 ## Current state
 
-**ATLAS is complete for its current scope.** The project has progressed from a basic forwarding prototype into a compact reverse-proxy implementation with HTTP framing, upstream reuse, routing, retries, timeouts, active health checks, metrics, structured logging, benchmarks, and fault-injection coverage.
+**ATLAS is complete for its current scope.** The implementation has progressed beyond basic request forwarding into a focused reverse-proxy system with HTTP framing, connection reuse, multi-backend routing, retries, timeouts, active health checks, passive failure handling, graceful shutdown, metrics, structured logging, benchmarks, and fault-injection coverage.
 
-Further work such as HTTP/2, TLS termination, dynamic configuration, a larger connection pool, distributed tracing, or high-volume load testing would be a new project phase rather than required finishing work for this version.
+The repository's CI workflow enforces formatting, Clippy with warnings denied, and the test suite on pushes and pull requests to `main`.
+
+Potential future work such as HTTP/2, TLS termination, dynamic configuration, distributed tracing, high-volume load testing, or a larger connection-pool subsystem would represent a new engineering phase rather than unfinished core work.
 
 ## Author
 
