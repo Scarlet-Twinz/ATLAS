@@ -400,6 +400,9 @@ async fn read_response(upstream: &mut TcpStream) -> Result<Vec<u8>, ProxyError> 
         }
 
         response.extend_from_slice(&chunk[..bytes_read]);
+        if let Some(end) = find_header_end(&response) {
+            break end;
+        }
         if response.len() > MAX_HEADER_BYTES {
             return Err(ProxyError::Http(ParseError::HeadersTooLarge));
         }
