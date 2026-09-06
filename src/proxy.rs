@@ -9,7 +9,7 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-use crate::http::{parse_request, HttpRequest, ParseError, MAX_HEADER_BYTES};
+use crate::http::{parse_request, parse_response_head, HttpRequest, ParseError, ResponseBodyMode, MAX_HEADER_BYTES};
 
 const BUFFER_SIZE: usize = 16 * 1024;
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
@@ -373,19 +373,63 @@ async fn forward_once(
     upstream.write_all(request_bytes).await?;
     upstream.shutdown().await?;
 
-    let read_result = timeout(state.config.request_timeout, async {
-        let mut response = Vec::new();
-        upstream.read_to_end(&mut response).await?;
-        Ok::<Vec<u8>, std::io::Error>(response)
-    })
-    .await;
+    let read_result = timeout(state.config.request_timeout, read_response(&mut upstream)).await;
 
     match read_result {
         Ok(Ok(response)) if response.is_empty() => Err(ProxyError::UpstreamUnavailable),
         Ok(Ok(response)) => Ok(response),
-        Ok(Err(error)) => Err(ProxyError::Io(error)),
+        Ok(Err(error)) => Err(error),
         Err(_) => Err(ProxyError::UpstreamTimeout),
     }
+}
+
+async fn read_response(upstream: &mut TcpStream) -> Result<Vec<u8>, ProxyError> {
+    let mut response = Vec::with_capacity(BUFFER_SIZE);
+    let mut chunk = vec![0_u8; BUFFER_SIZE];
+
+    let header_end = loop {
+        if let Some(end) = find_header_end(&response) {
+            break end;
+        }
+
+        let bytes_read = upstream.read(&mut chunk).await?;
+        if bytes_read == 0 {
+            return Err(ProxyError::UpstreamUnavailable);
+        }
+
+        response.extend_from_slice(&chunk[..bytes_read]);
+        if response.len() > MAX_HEADER_BYTES {
+            return Err(ProxyError::Http(ParseError::HeadersTooLarge));
+        }
+    };
+
+    let head = parse_response_head(&response[..header_end])?;
+
+    match head.body {
+        ResponseBodyMode::None => {
+            response.truncate(header_end);
+        }
+        ResponseBodyMode::ContentLength(length) => {
+            let total = header_end
+                .checked_add(length)
+                .ok_or(ProxyError::RequestBodyTooLarge)?;
+
+            while response.len() < total {
+                let bytes_read = upstream.read(&mut chunk).await?;
+                if bytes_read == 0 {
+                    return Err(ProxyError::UpstreamUnavailable);
+                }
+                response.extend_from_slice(&chunk[..bytes_read]);
+            }
+
+            response.truncate(total);
+        }
+        ResponseBodyMode::Chunked | ResponseBodyMode::UntilClose => {
+            upstream.read_to_end(&mut response).await?;
+        }
+    }
+
+    Ok(response)
 }
 
 fn request_content_length(request: &HttpRequest) -> Result<usize, ProxyError> {
@@ -547,5 +591,52 @@ mod tests {
             .metrics()
             .render_prometheus()
             .contains("atlas_requests_total"));
+    }
+}
+
+#[cfg(test)]
+mod response_runtime_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn reads_content_length_response_without_waiting_for_close() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nhello")
+                .await
+                .unwrap();
+        });
+
+        let mut client = TcpStream::connect(address).await.unwrap();
+        let response = read_response(&mut client).await.unwrap();
+        assert_eq!(response, b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nhello");
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reads_no_body_response_without_waiting_for_body_bytes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\n\r\n")
+                .await
+                .unwrap();
+        });
+
+        let mut client = TcpStream::connect(address).await.unwrap();
+        let response = read_response(&mut client).await.unwrap();
+        assert_eq!(response, b"HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\n\r\n");
+
+        server.await.unwrap();
     }
 }
