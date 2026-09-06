@@ -26,10 +26,7 @@ async fn unavailable_backend_returns_503() {
     });
 
     let mut client = tokio::net::TcpStream::connect(proxy_addr).await.unwrap();
-    client
-        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        .await
-        .unwrap();
+    client.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").await.unwrap();
     let mut response = Vec::new();
     client.read_to_end(&mut response).await.unwrap();
     assert!(response.starts_with(b"HTTP/1.1 503 Service Unavailable\r\n"));
@@ -41,19 +38,14 @@ async fn metrics_endpoint_is_available_without_upstream() {
     let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = proxy_listener.local_addr().unwrap();
     let state = ProxyState::new(ProxyConfig::default());
-    state.metrics().request_started_for_test();
 
-    let server_state = state.clone();
     let server = tokio::spawn(async move {
         let (stream, _) = proxy_listener.accept().await.unwrap();
-        proxy_connection_with_state(stream, server_state).await
+        proxy_connection_with_state(stream, state).await
     });
 
     let mut client = tokio::net::TcpStream::connect(proxy_addr).await.unwrap();
-    client
-        .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        .await
-        .unwrap();
+    client.write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").await.unwrap();
     let mut response = String::new();
     client.read_to_string(&mut response).await.unwrap();
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
