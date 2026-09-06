@@ -2,41 +2,10 @@ use std::error::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+use atlas::parse_request;
+
 const LISTEN_ADDR: &str = "127.0.0.1:8080";
 const BUFFER_SIZE: usize = 16 * 1024;
-
-#[derive(Debug, PartialEq, Eq)]
-struct HttpRequestLine<'a> {
-    method: &'a str,
-    target: &'a str,
-    version: &'a str,
-}
-
-fn parse_request_line(request: &str) -> Result<HttpRequestLine<'_>, &'static str> {
-    let line = request
-        .lines()
-        .next()
-        .ok_or("missing HTTP request line")?;
-
-    let mut parts = line.split_whitespace();
-    let method = parts.next().ok_or("missing HTTP method")?;
-    let target = parts.next().ok_or("missing request target")?;
-    let version = parts.next().ok_or("missing HTTP version")?;
-
-    if parts.next().is_some() {
-        return Err("malformed HTTP request line");
-    }
-
-    if !matches!(version, "HTTP/1.0" | "HTTP/1.1") {
-        return Err("unsupported HTTP version");
-    }
-
-    Ok(HttpRequestLine {
-        method,
-        target,
-        version,
-    })
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -65,11 +34,14 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), Box<dyn Error + 
 
     let request = String::from_utf8_lossy(&buffer[..bytes_read]);
 
-    match parse_request_line(&request) {
-        Ok(request_line) => {
+    match parse_request(&request) {
+        Ok(request) => {
             println!(
-                "request: {} {} {}",
-                request_line.method, request_line.target, request_line.version
+                "request: {} {} {} headers={}",
+                request.method,
+                request.target,
+                request.version,
+                request.headers.len()
             );
         }
         Err(error) => {
@@ -91,51 +63,4 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), Box<dyn Error + 
     stream.shutdown().await?;
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_valid_http11_request_line() {
-        let request = parse_request_line("GET /health HTTP/1.1\r\nHost: localhost\r\n").unwrap();
-
-        assert_eq!(
-            request,
-            HttpRequestLine {
-                method: "GET",
-                target: "/health",
-                version: "HTTP/1.1",
-            }
-        );
-    }
-
-    #[test]
-    fn parses_http10_request_line() {
-        let request = parse_request_line("GET / HTTP/1.0\r\n").unwrap();
-
-        assert_eq!(request.version, "HTTP/1.0");
-    }
-
-    #[test]
-    fn rejects_extra_request_line_fields() {
-        assert_eq!(
-            parse_request_line("GET / HTTP/1.1 unexpected\r\n"),
-            Err("malformed HTTP request line")
-        );
-    }
-
-    #[test]
-    fn rejects_unsupported_http_version() {
-        assert_eq!(
-            parse_request_line("GET / HTTP/2.0\r\n"),
-            Err("unsupported HTTP version")
-        );
-    }
-
-    #[test]
-    fn rejects_empty_request() {
-        assert_eq!(parse_request_line(""), Err("missing HTTP request line"));
-    }
 }
