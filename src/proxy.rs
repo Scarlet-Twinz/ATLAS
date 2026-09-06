@@ -9,7 +9,9 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-use crate::http::{parse_request, parse_response_head, HttpRequest, ParseError, ResponseBodyMode, MAX_HEADER_BYTES};
+use crate::http::{
+    parse_request, parse_response_head, HttpRequest, ParseError, ResponseBodyMode, MAX_HEADER_BYTES,
+};
 
 const BUFFER_SIZE: usize = 16 * 1024;
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
