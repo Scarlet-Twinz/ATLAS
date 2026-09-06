@@ -136,7 +136,7 @@ pub fn parse_response_head(response: &[u8]) -> Result<HttpResponseHead, ParseErr
     let status = parts.next().ok_or(ParseError::InvalidStatusLine)?;
     let reason = parts.next().unwrap_or_default();
 
-    if version != "HTTP/1.1" {
+    if version != "HTTP/1.0" && version != "HTTP/1.1" {
         return Err(ParseError::UnsupportedVersion);
     }
 
@@ -148,7 +148,7 @@ pub fn parse_response_head(response: &[u8]) -> Result<HttpResponseHead, ParseErr
         .parse::<u16>()
         .map_err(|_| ParseError::InvalidStatusCode)?;
     let headers = parse_headers(&mut lines, false)?;
-    let body = response_body_mode(status, &headers)?;
+    let body = response_body_mode(status, version, &headers)?;
 
     Ok(HttpResponseHead {
         version: version.to_owned(),
@@ -199,6 +199,7 @@ where
 
 fn response_body_mode(
     status: u16,
+    version: &str,
     headers: &[(String, String)],
 ) -> Result<ResponseBodyMode, ParseError> {
     if (100..200).contains(&status) || status == 204 || status == 304 {
@@ -237,6 +238,10 @@ fn response_body_mode(
             return Err(ParseError::ConflictingContentLength);
         }
         return Ok(ResponseBodyMode::ContentLength(length));
+    }
+
+    if version == "HTTP/1.0" {
+        return Ok(ResponseBodyMode::UntilClose);
     }
 
     Ok(ResponseBodyMode::UntilClose)
@@ -321,6 +326,15 @@ mod tests {
 
         assert_eq!(parsed.status, 200);
         assert_eq!(parsed.reason, "OK");
+        assert_eq!(parsed.body, ResponseBodyMode::ContentLength(5));
+    }
+
+    #[test]
+    fn parses_http_10_response() {
+        let response = b"HTTP/1.0 200 OK\r\nContent-Length: 5\r\n\r\n";
+        let parsed = parse_response_head(response).unwrap();
+
+        assert_eq!(parsed.version, "HTTP/1.0");
         assert_eq!(parsed.body, ResponseBodyMode::ContentLength(5));
     }
 
