@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn rejects_missing_target() {
-        let error = parse_request("GET HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap_err();
+        let error = parse_request("GET  \r\nHost: localhost\r\n\r\n").unwrap_err();
         assert_eq!(error, ParseError::MissingTarget);
     }
 
