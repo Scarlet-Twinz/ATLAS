@@ -12,6 +12,7 @@ use tokio::time::timeout;
 use crate::http::{parse_request, HttpRequest, ParseError, MAX_HEADER_BYTES};
 
 const BUFFER_SIZE: usize = 16 * 1024;
+const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const BACKEND_COOLDOWN: Duration = Duration::from_secs(5);
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -199,6 +200,8 @@ pub enum ProxyError {
     NoHealthyBackends,
     UpstreamUnavailable,
     UpstreamTimeout,
+    RequestBodyTooLarge,
+    InvalidContentLength,
     InvalidConfiguration(&'static str),
 }
 
@@ -213,6 +216,8 @@ impl fmt::Display for ProxyError {
             Self::NoHealthyBackends => f.write_str("no healthy upstream backends available"),
             Self::UpstreamUnavailable => f.write_str("upstream unavailable"),
             Self::UpstreamTimeout => f.write_str("upstream request timed out"),
+            Self::RequestBodyTooLarge => f.write_str("request body exceeds maximum size"),
+            Self::InvalidContentLength => f.write_str("invalid Content-Length header"),
             Self::InvalidConfiguration(name) => write!(f, "invalid configuration: {name}"),
         }
     }
@@ -241,26 +246,48 @@ pub async fn proxy_connection_with_state(mut client: TcpStream, state: ProxyStat
     let mut chunk = vec![0_u8; BUFFER_SIZE];
 
     loop {
-        let bytes_read = client.read(&mut chunk).await?;
-        if bytes_read == 0 {
-            return Ok(());
-        }
+        let header_end = loop {
+            if let Some(end) = find_header_end(&read_buffer) {
+                break end;
+            }
 
-        read_buffer.extend_from_slice(&chunk[..bytes_read]);
-        if read_buffer.len() > MAX_HEADER_BYTES {
-            state.metrics.request_failed();
-            return Err(ProxyError::Http(ParseError::HeadersTooLarge));
-        }
+            let bytes_read = client.read(&mut chunk).await?;
+            if bytes_read == 0 {
+                return Ok(());
+            }
 
-        let Some(header_end) = find_header_end(&read_buffer) else {
-            continue;
+            read_buffer.extend_from_slice(&chunk[..bytes_read]);
+            if read_buffer.len() > MAX_HEADER_BYTES {
+                state.metrics.request_failed();
+                return Err(ProxyError::Http(ParseError::HeadersTooLarge));
+            }
         };
 
-        let request_text = String::from_utf8_lossy(&read_buffer[..header_end]);
+        let header_bytes = &read_buffer[..header_end];
+        let request_text = String::from_utf8_lossy(header_bytes);
         let request = parse_request(&request_text)?;
         state.metrics.request_started();
 
-        let request_bytes = read_buffer[..header_end].to_vec();
+        let content_length = request_content_length(&request)?;
+        if content_length > MAX_BODY_BYTES {
+            state.metrics.request_failed();
+            return Err(ProxyError::RequestBodyTooLarge);
+        }
+
+        let total_request_bytes = header_end + content_length;
+        while read_buffer.len() < total_request_bytes {
+            let bytes_read = client.read(&mut chunk).await?;
+            if bytes_read == 0 {
+                state.metrics.request_failed();
+                return Err(ProxyError::Http(ParseError::IncompleteRequest));
+            }
+            read_buffer.extend_from_slice(&chunk[..bytes_read]);
+            if read_buffer.len() > total_request_bytes {
+                break;
+            }
+        }
+
+        let request_bytes = read_buffer[..total_request_bytes].to_vec();
         let response = match forward_with_retries(&state, &request, &request_bytes).await {
             Ok(response) => response,
             Err(error) => {
@@ -273,7 +300,7 @@ pub async fn proxy_connection_with_state(mut client: TcpStream, state: ProxyStat
         client.write_all(&response).await?;
         state.metrics.request_succeeded(response.len());
 
-        read_buffer.drain(..header_end);
+        read_buffer.drain(..total_request_bytes);
         if request_has_connection_close(&request) {
             client.shutdown().await?;
             return Ok(());
@@ -283,7 +310,7 @@ pub async fn proxy_connection_with_state(mut client: TcpStream, state: ProxyStat
 
 async fn forward_with_retries(
     state: &ProxyState,
-    request: &HttpRequest,
+    _request: &HttpRequest,
     request_bytes: &[u8],
 ) -> Result<Vec<u8>, ProxyError> {
     let attempts = state.config.max_retries.saturating_add(1);
@@ -298,7 +325,7 @@ async fn forward_with_retries(
             return Err(ProxyError::NoHealthyBackends);
         };
 
-        match forward_once(state, backend, request, request_bytes).await {
+        match forward_once(state, backend, request_bytes).await {
             Ok(response) => {
                 state.pool.lock().await.mark_success(backend);
                 return Ok(response);
@@ -321,7 +348,6 @@ async fn forward_with_retries(
 async fn forward_once(
     state: &ProxyState,
     backend: SocketAddr,
-    _request: &HttpRequest,
     request_bytes: &[u8],
 ) -> Result<Vec<u8>, ProxyError> {
     let connect = timeout(state.config.connect_timeout, TcpStream::connect(backend)).await;
@@ -350,6 +376,20 @@ async fn forward_once(
     }
 }
 
+fn request_content_length(request: &HttpRequest) -> Result<usize, ProxyError> {
+    let Some((_, value)) = request
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+    else {
+        return Ok(0);
+    };
+
+    value
+        .parse::<usize>()
+        .map_err(|_| ProxyError::InvalidContentLength)
+}
+
 fn request_has_connection_close(request: &HttpRequest) -> bool {
     request.headers.iter().any(|(name, value)| {
         name.eq_ignore_ascii_case("connection")
@@ -368,7 +408,9 @@ fn find_header_end(buffer: &[u8]) -> Option<usize> {
 
 async fn write_error_response(client: &mut TcpStream, error: &ProxyError) -> Result<(), std::io::Error> {
     let (status, reason) = match error {
-        ProxyError::Http(_) => (400, "Bad Request"),
+        ProxyError::Http(_)
+        | ProxyError::InvalidContentLength
+        | ProxyError::RequestBodyTooLarge => (400, "Bad Request"),
         ProxyError::UpstreamTimeout => (504, "Gateway Timeout"),
         ProxyError::NoHealthyBackends | ProxyError::UpstreamUnavailable => (503, "Service Unavailable"),
         _ => (502, "Bad Gateway"),
@@ -392,20 +434,24 @@ fn parse_backends(value: &str) -> Result<Vec<SocketAddr>, ProxyError> {
         .collect()
 }
 
-fn env_duration(name: &str, default: Duration) -> Result<Duration, ProxyError> {
+fn env_duration(name: &'static str, default: Duration) -> Result<Duration, ProxyError> {
     let Some(value) = std::env::var(name).ok() else {
         return Ok(default);
     };
 
     let millis = value
         .parse::<u64>()
-        .map_err(|_| ProxyError::InvalidConfiguration(Box::leak(name.to_owned().into_boxed_str())))?;
+        .map_err(|_| ProxyError::InvalidConfiguration(name))?;
     Ok(Duration::from_millis(millis))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn request_with_host(host: &str) -> HttpRequest {
+        parse_request(&format!("GET / HTTP/1.1\r\nHost: {host}\r\n\r\n")).unwrap()
+    }
 
     #[test]
     fn selects_backends_round_robin() {
@@ -441,5 +487,40 @@ mod tests {
     fn parses_backend_list() {
         let backends = parse_backends("127.0.0.1:9000, 127.0.0.1:9001").unwrap();
         assert_eq!(backends.len(), 2);
+    }
+
+    #[test]
+    fn parses_content_length() {
+        let request = parse_request(
+            "POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: 42\r\n\r\n",
+        )
+        .unwrap();
+        assert_eq!(request_content_length(&request).unwrap(), 42);
+    }
+
+    #[test]
+    fn rejects_invalid_content_length() {
+        let request = parse_request(
+            "POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Length: nope\r\n\r\n",
+        )
+        .unwrap();
+        assert!(matches!(request_content_length(&request), Err(ProxyError::InvalidContentLength)));
+    }
+
+    #[test]
+    fn detects_connection_close() {
+        let request = parse_request(
+            "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive, close\r\n\r\n",
+        )
+        .unwrap();
+        assert!(request_has_connection_close(&request));
+    }
+
+    #[test]
+    fn state_can_be_constructed_from_config() {
+        let request = request_with_host("localhost");
+        assert_eq!(request.method, "GET");
+        let state = ProxyState::new(ProxyConfig::default());
+        assert!(state.metrics().render_prometheus().contains("atlas_requests_total"));
     }
 }
