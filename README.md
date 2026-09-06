@@ -2,34 +2,41 @@
 
 **HTTP reverse proxy built in Rust.**
 
-ATLAS is a systems-oriented networking project focused on HTTP request handling, concurrent connections, backend routing, health checks, timeouts, and proxy execution.
+ATLAS is a systems-oriented networking project focused on HTTP request handling, concurrent connections, backend forwarding, routing, health checks, timeouts, and proxy execution.
 
 ## Current milestone
 
-The first milestone establishes the network foundation:
+The current milestone establishes the first working proxy path:
 
 - Rust project structure
 - Tokio-based asynchronous runtime
 - TCP listener
 - Concurrent connection handling
-- Initial HTTP/1.1 response generation
-- Request-line inspection
+- HTTP/1.1 request parsing
+- Host-based backend selection
+- HTTP request forwarding to an upstream service
+- Upstream response forwarding back to the client
+- Explicit rejection of malformed requests
+- Unit coverage for request parsing and backend selection
 
 ## Architecture
 
 ```text
 Client
   |
-  | HTTP
+  | HTTP/1.1
   v
 +-------+
 | ATLAS |
 | Proxy |
 +---+---+
     |
+    | TCP
     v
- Backend services
+Backend service
 ```
+
+ATLAS currently uses the request's `Host` header as the upstream address. This is intentionally a small first forwarding layer; backend pools, load balancing, health checking, retries, and richer connection management will be added incrementally.
 
 ## Getting started
 
