@@ -1,23 +1,58 @@
 use std::error::Error;
-use tokio::net::TcpListener;
+use std::sync::Arc;
+use std::time::Duration;
 
-use atlas::proxy_connection;
+use atlas::{proxy_connection_with_state, ProxyConfig, ProxyState};
+use tokio::net::TcpListener;
+use tokio::time::interval;
 
 const LISTEN_ADDR: &str = "127.0.0.1:8080";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let config = ProxyConfig::from_env()?;
+    let state = ProxyState::new(config.clone());
+    let metrics = state.metrics();
+    let state = Arc::new(state);
+
     let listener = TcpListener::bind(LISTEN_ADDR).await?;
     println!("ATLAS listening on http://{LISTEN_ADDR}");
+    println!("upstreams={:?}", config.backends);
+    println!("connect_timeout_ms={}", config.connect_timeout.as_millis());
+    println!("request_timeout_ms={}", config.request_timeout.as_millis());
+    println!("max_retries={}", config.max_retries);
+
+    let metrics_task = {
+        let metrics = metrics.clone();
+        tokio::spawn(async move {
+            let mut ticker = interval(Duration::from_secs(30));
+            loop {
+                ticker.tick().await;
+                println!("--- ATLAS metrics ---\n{}", metrics.render_prometheus());
+            }
+        })
+    };
 
     loop {
-        let (stream, peer) = listener.accept().await?;
-        println!("accepted connection from {peer}");
+        tokio::select! {
+            result = listener.accept() => {
+                let (stream, peer) = result?;
+                let state = Arc::clone(&state);
+                println!("accepted connection from {peer}");
 
-        tokio::spawn(async move {
-            if let Err(error) = proxy_connection(stream).await {
-                eprintln!("connection error from {peer}: {error}");
+                tokio::spawn(async move {
+                    if let Err(error) = proxy_connection_with_state(stream, (*state).clone()).await {
+                        eprintln!("connection error from {peer}: {error}");
+                    }
+                });
             }
-        });
+            _ = tokio::signal::ctrl_c() => {
+                println!("shutdown signal received; stopping ATLAS");
+                break;
+            }
+        }
     }
+
+    metrics_task.abort();
+    Ok(())
 }
