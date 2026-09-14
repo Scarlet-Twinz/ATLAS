@@ -19,8 +19,8 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Check formatting
-        run: cargo fmt -- --check
+      - name: Format workspace
+        run: cargo fmt --all
 
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
