@@ -1,4 +1,4 @@
-#  ATLAS
+# ATLAS
 
 **Systems-oriented HTTP reverse proxy built in Rust.**
 
