@@ -101,6 +101,13 @@ The listener defaults to `127.0.0.1:8080`.
 
 ## Local Run
 
+### Clone
+
+```bash
+git clone https://github.com/Scarlet-Twinz/ATLAS.git
+cd ATLAS
+```
+
 Prerequisites:
 
 - Rust/Cargo
