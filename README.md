@@ -163,21 +163,9 @@ ATLAS has progressed beyond basic forwarding into a focused reverse-proxy implem
 
 Potential next phases include HTTP/2, TLS termination, dynamic configuration, distributed tracing, higher-volume load testing, and a larger connection-pool subsystem. These are intentionally outside the current scope.
 
+
 ## License
 
-MIT
+MIT License.
 
-
-The project is intentionally small enough to inspect end-to-end while still demonstrating real HTTP and network-service concerns.
-
-## Author
-
-**Anthony Emmanuella Mmasinachi**
-
-Full-stack and systems engineer focused on backend infrastructure, networking, distributed systems, databases, AI integration, and systems programming.
-
-## Project Links
-
-- **Repository:** https://github.com/Scarlet-Twinz/ATLAS
-- **Author:** Anthony Emmanuella Mmasinachi
-- **GitHub:** https://github.com/Scarlet-Twinz
+See [LICENSE](LICENSE) for the full license text.
